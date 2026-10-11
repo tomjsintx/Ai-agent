@@ -1,0 +1,70 @@
+name: apply-bundle
+on:
+  workflow_dispatch:
+    inputs:
+      bundle:
+        description: 'Đường dẫn file bundle, ví dụ bundles/g1.txt'
+        required: true
+permissions:
+  contents: write
+  actions: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Áp dụng bundle
+        env:
+          BUNDLE: ${{ inputs.bundle }}
+        run: |
+          set -euo pipefail
+          python3 - "$BUNDLE" <<'PY'
+          import pathlib, re, sys
+          src = pathlib.Path(sys.argv[1])
+          lines = src.read_text(encoding='utf-8').replace('\r\n', '\n').split('\n')
+          hdr = re.compile(r'^=== FILE: (.+?) ===\s*$')
+          dele = re.compile(r'^=== DELETE: (.+?) ===\s*$')
+          def safe(rel):
+              p = pathlib.PurePosixPath(rel.strip())
+              if p.is_absolute() or not p.parts or '..' in p.parts or p.parts[0] in ('.git', '.github'):
+                  sys.exit('Đường dẫn bị từ chối: ' + rel)
+              return p
+          writes, deletes, cur, buf = [], [], None, []
+          for ln in lines:
+              if cur is None:
+                  m = hdr.match(ln)
+                  if m:
+                      cur, buf = safe(m.group(1)), []
+                      continue
+                  m = dele.match(ln)
+                  if m:
+                      deletes.append(safe(m.group(1)))
+              elif ln.strip() == '=== END ===':
+                  writes.append((cur, '\n'.join(buf) + '\n'))
+                  cur = None
+              else:
+                  buf.append(ln)
+          if cur is not None:
+              sys.exit('Thiếu === END === cho: ' + str(cur))
+          if not writes and not deletes:
+              sys.exit('Bundle rỗng hoặc sai định dạng')
+          for p, txt in writes:
+              d = pathlib.Path(*p.parts)
+              d.parent.mkdir(parents=True, exist_ok=True)
+              d.write_text(txt, encoding='utf-8', newline='\n')
+              print('ghi', p)
+          for p in deletes:
+              pathlib.Path(*p.parts).unlink(missing_ok=True)
+              print('xóa', p)
+          PY
+          rm -f "$BUNDLE"
+      - name: Commit và chạy CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'chore: apply bundle' || echo 'Không có thay đổi'
+          git push
+          gh workflow run ci.yml --ref "${GITHUB_REF_NAME}" || echo 'ci.yml chưa có hoặc chưa bật workflow_dispatch'
